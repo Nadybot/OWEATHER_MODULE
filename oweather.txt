@@ -1,0 +1,24 @@
+To search for weather data based on City:
+<highlight><tab><symbol>oweather 'city name'<end>
+
+To search for weather data based on City, country:
+<highlight><tab><symbol>oweather 'city name, country code'<end>
+
+To search for weather data based on zip code and country code:
+<highlight><tab><symbol>oweather 'zip, country code'<end>
+
+Note: if the city returned is not the one you wanted, try using the zip search.
+
+<header2>Examples:<end>
+
+Shows the weather for York:
+<highlight><tab><symbol>oweather York<end>
+
+Shows the weather for York in Canada:
+<highlight><tab><symbol>oweather York,ca<end>
+
+Shows the weather for Marburg, Germany using one of its zip codes:
+<highlight><tab><symbol>oweather 35043,de<end>
+
+Shows the weather for Bronx, New York using one of its zip codes:
+<highlight><tab><symbol>oweather 10453,us<end>
