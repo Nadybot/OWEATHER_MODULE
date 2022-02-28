@@ -65,7 +65,7 @@ class OWeatherController extends ModuleInstance {
 			mode: "edit",
 			type: "text",
 			value: "None",
-			options: "None",
+			options: ["None"],
 			accessLevel: "mod"
 		);
 	}
@@ -410,7 +410,7 @@ class OWeatherController extends ModuleInstance {
 	}
 
 	/**
-	 * Get the currect weather for &lt;location&gt;
+	 * Get the current weather for &lt;location&gt;
 	 */
 	#[NCA\HandlesCommand("oweather")]
 	#[NCA\Help\Group("oweather")]
