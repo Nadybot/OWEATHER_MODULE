@@ -16,7 +16,7 @@ class ForecastWeather extends DataTransferObject {
 	public array $clouds;
 	public Wind $wind;
 	public ?int $visibility = null;
-	public int $pop;
+	public float $pop;
 	/** @var null|array<string,float> */
 	public ?array $rain = null;
 }

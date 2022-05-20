@@ -56,19 +56,11 @@ class OWeatherController extends ModuleInstance {
 	#[NCA\Inject]
 	public Http $http;
 
-	#[NCA\Setup]
-	public function setup(): void {
-		$this->settingManager->add(
-			module: $this->moduleName,
-			name: "oweather_api_key",
-			description: "The OpenWeatherMap API key",
-			mode: "edit",
-			type: "text",
-			value: "None",
-			options: ["None"],
-			accessLevel: "mod"
-		);
-	}
+	/** TheOpenWeatherMap API key */
+	#[NCA\Setting\Text(options: [
+		"None"
+	])]
+	public string $oweatherApiKey = "None";
 
 	/**
 	 * Try to convert a wind degree into a wind direction
@@ -363,7 +355,7 @@ class OWeatherController extends ModuleInstance {
 	#[NCA\Help\Example("<symbol>forecast 30629, de", "to search by ZIP")]
 	#[NCA\Help\Group("oweather")]
 	public function forecastCommand(CmdContext $context, string $location): void {
-		$apiKey = $this->settingManager->getString('oweather_api_key') ?? "";
+		$apiKey = $this->oweatherApiKey;
 		if (strlen($apiKey) !== 32) {
 			$context->reply("There is either no API key or an invalid one was set.");
 			return;
@@ -402,6 +394,11 @@ class OWeatherController extends ModuleInstance {
 			return;
 		}
 		$blob = $this->forecastToString($forecast);
+		$blob = preg_replace(
+			"/<highlight><black>([^<]+)<end>([^<]+)<end>/",
+			'<black>$1<end><highlight>$2<end>',
+			$blob
+		);
 
 		$locCC = $this->getCountryName($forecast->city->country);
 		$msg = $this->text->makeBlob("Weather forecast for {$forecast->city->name}, {$locCC}", $blob);
@@ -418,7 +415,7 @@ class OWeatherController extends ModuleInstance {
 	#[NCA\Help\Example("<symbol>oweather Hamburg, US")]
 	#[NCA\Help\Example("<symbol>oweather 30629, de", "to search by ZIP")]
 	public function weatherCommand(CmdContext $context, string $location): void {
-		$apiKey = $this->settingManager->getString('oweather_api_key') ?? "";
+		$apiKey = $this->oweatherApiKey;
 		if (strlen($apiKey) != 32) {
 			$context->reply("There is either no API key or an invalid one was set.");
 			return;
