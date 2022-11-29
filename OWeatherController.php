@@ -6,39 +6,45 @@ namespace Nadybot\User\Modules\OWEATHER_MODULE;
  * @author Nadyita (RK5) <nadyita@hodorraid.org>
  */
 
+use function Amp\call;
+use function Safe\json_decode;
+use Amp\Http\Client\{HttpClientBuilder, Request, Response};
+use Amp\Promise;
 use DateTimeZone;
+use Generator;
 use Nadybot\Core\{
 	Attributes as NCA,
 	CmdContext,
-	Http,
-	HttpResponse,
 	ModuleInstance,
 	SettingManager,
 	Text,
+	UserException,
 	Util,
+};
+use Nadybot\Modules\WEATHER_MODULE\{
+	Nominatim,
+	WeatherController,
 };
 use Nadybot\User\Modules\OWEATHER_MODULE\Model\{
 	Coordinates,
-	Weather,
 	Forecast,
 	ForecastWeather,
+	Weather,
 };
 use Safe\DateTime;
 use Safe\Exceptions\JsonException;
-use Throwable;
 
-use function Safe\date;
-use function Safe\json_decode;
+use Throwable;
 
 #[
 	NCA\Instance,
 	NCA\DefineCommand(
-		command:     'oweather',
+		command: 'oweather',
 		accessLevel: 'guest',
 		description: 'View Weather for any location',
 	),
 	NCA\DefineCommand(
-		command:     'forecast',
+		command: 'forecast',
 		accessLevel: 'guest',
 		description: 'View Weather forecast for any location',
 	)
@@ -54,17 +60,18 @@ class OWeatherController extends ModuleInstance {
 	public SettingManager $settingManager;
 
 	#[NCA\Inject]
-	public Http $http;
+	public HttpClientBuilder $builder;
+
+	#[NCA\Inject]
+	public WeatherController $weatherController;
 
 	/** TheOpenWeatherMap API key */
 	#[NCA\Setting\Text(options: [
-		"None"
+		"None",
 	])]
 	public string $oweatherApiKey = "None";
 
-	/**
-	 * Try to convert a wind degree into a wind direction
-	 */
+	/** Try to convert a wind degree into a wind direction */
 	public function degreeToDirection(int $degree): string {
 		$mapping = [
 			0   => "N",
@@ -96,9 +103,7 @@ class OWeatherController extends ModuleInstance {
 		return $current;
 	}
 
-	/**
-	 * Convert the windspeed in m/s into the wind's strength according to beaufort
-	 */
+	/** Convert the windspeed in m/s into the wind's strength according to beaufort */
 	public function getWindStrength(float $speed): string {
 		$beaufortScale = [
 			'32.7' => 'hurricane',
@@ -123,9 +128,7 @@ class OWeatherController extends ModuleInstance {
 		return 'unknown';
 	}
 
-	/**
-	 * Return a link to OpenStreetMap at the given coordinates
-	 */
+	/** Return a link to OpenStreetMap at the given coordinates */
 	public function getOSMLink(Coordinates $coords): string {
 		$zoom = 12; // Zoom is 1 to 20 (full in)
 		$lat = number_format($coords->lat, 4);
@@ -144,47 +147,38 @@ class OWeatherController extends ModuleInstance {
 			if ($degrees > 0) {
 				return ["-_", $temp];
 			}
-			return ["_", "-$temp"];
+			return ["_", "-{$temp}"];
 		} elseif ($degrees > 0) {
 			return ["-", $temp];
 		}
-		return ["", "-$temp"];
+		return ["", "-{$temp}"];
 	}
 
-	public function getCountryName(string $cc): string {
-		if (!function_exists("locale_get_display_region")) {
-			return $cc;
-		}
-		$result = locale_get_display_region("-$cc", "en");
-		if ($result === false) {
-			return $cc;
-		}
-		return $result;
-	}
-
-	public function forecastToString(Forecast $forecast): string {
-		$latString     = $forecast->city->coord->lat > 0
+	public function forecastToString(Forecast $forecast, Nominatim $address): string {
+		$latString   = $forecast->city->coord->lat > 0
 			? "N".$forecast->city->coord->lat
 			: "S".(-1 * $forecast->city->coord->lat);
-		$lonString     = $forecast->city->coord->lon > 0
+		$lonString   = $forecast->city->coord->lon > 0
 			? "E".$forecast->city->coord->lon
 			: "W".(-1 * $forecast->city->coord->lon);
-		$mapCommand    = $this->text->makeChatcmd("OpenStreetMap", "/start ".$this->getOSMLink($forecast->city->coord));
-		$locName       = $forecast->city->name;
-		$locCC         = $this->getCountryName($forecast->city->country);
-		$population    = number_format($forecast->city->population, 0);
-		$timezone      = $this->tzSecsToHours($forecast->city->timezone);
-		$currentTime   = (new DateTime("now", new DateTimeZone("UTC")))
+		$mapCommand  = $this->text->makeChatcmd("OpenStreetMap", "/start ".$this->getOSMLink($forecast->city->coord));
+		$timezone    = $this->tzSecsToHours($forecast->city->timezone);
+		$currentTime = (new DateTime("now", new DateTimeZone("UTC")))
 			->setTimestamp(time() + $forecast->city->timezone)
 			->format("l, H:i:s");
 
-		$blob = "Location: <highlight>$locName<end>, <highlight>$locCC<end>\n".
-			"Timezone: <highlight>UTC${timezone}<end>\n".
-			"Lat/Lon: <highlight>${latString}° ${lonString}°<end> $mapCommand\n".
-			"Population: <highlight>${population}<end>\n".
-			"Local time: <highlight>${currentTime}<end>\n".
+		$blob = "Location: <highlight>{$address->display_name}<end>\n";
+		if (isset($address->extratags->population)) {
+			$blob .= "Population: <highlight>".
+				number_format((float)$address->extratags->population, 0).
+				"<end>\n";
+		}
+		$blob .=
+			"Timezone: <highlight>UTC{$timezone}<end>\n".
+			"Lat/Lon: <highlight>{$latString}° {$lonString}°<end> {$mapCommand}\n".
+			"Local time: <highlight>{$currentTime}<end>\n".
 			"\n".
-			"All times are UTC${timezone}.\n";
+			"All times are UTC{$timezone}.\n";
 
 		/** @var array<string,ForecastWeather[]> */
 		$weatherByDay = [];
@@ -205,6 +199,7 @@ class OWeatherController extends ModuleInstance {
 		if (count($weatherByDay[$day]) < 8) {
 			unset($weatherByDay[$day]);
 		}
+
 		/** @var array<string,ForecastWeather[]> $weatherByDay */
 		foreach ($weatherByDay as $day => $forecastlist) {
 			$blob .= "\n<header2>{$day}<end>\n";
@@ -220,8 +215,8 @@ class OWeatherController extends ModuleInstance {
 				if (strlen($tempFeelsCFill)) {
 					$tempFeelsCFill = "<black>{$tempFeelsCFill}<end>";
 				}
-				$blob .= "<tab>$when: {$tempCFill}<highlight>${tempC}°C<end>, ".
-					"feels like {$tempFeelsCFill}<highlight>${tempFeelsC}°C<end>".
+				$blob .= "<tab>{$when}: {$tempCFill}<highlight>{$tempC}°C<end>, ".
+					"feels like {$tempFeelsCFill}<highlight>{$tempFeelsC}°C<end>".
 					"";
 				if (isset($forecast->clouds)) {
 					$clouds = $step->clouds["all"] ?? 0;
@@ -245,10 +240,8 @@ class OWeatherController extends ModuleInstance {
 		return $blob;
 	}
 
-	/**
-	 * Convert the result hash of the API into a blob string
-	 */
-	public function weatherToString(Weather $weather): string {
+	/** Convert the result hash of the API into a blob string */
+	public function weatherToString(Weather $weather, Nominatim $address): string {
 		$latString     = $weather->coord->lat > 0
 			? "N" . $weather->coord->lat
 			: "S" . (-1 * $weather->coord->lat);
@@ -257,8 +250,6 @@ class OWeatherController extends ModuleInstance {
 			: "W" . (-1 * $weather->coord->lon);
 		$mapCommand    = $this->text->makeChatcmd("OpenStreetMap", "/start ".$this->getOSMLink($weather->coord));
 		$luString      = $this->util->date($weather->dt);
-		$locName       = $weather->name;
-		$locCC         = $this->getCountryName($weather->sys->country);
 		$tempC         = number_format($weather->main->temp, 1);
 		$tempFeelsC    = number_format($weather->main->feels_like, 1);
 		$tempF         = number_format($weather->main->temp * 1.8 + 32, 1);
@@ -284,30 +275,37 @@ class OWeatherController extends ModuleInstance {
 			$visibilityMiles = number_format($weather->visibility/1609.3, 1);
 		}
 
-		$blob = "Last Updated: <highlight>$luString<end>\n".
+		$blob = "Last Updated: <highlight>{$luString}<end>\n".
 			"\n".
-			"Location: <highlight>${locName}<end>, <highlight>${locCC}<end>\n".
-			"Timezone: <highlight>UTC${timezone}<end>\n".
-			"Lat/Lon: <highlight>${latString}° ${lonString}°<end> ${mapCommand}\n".
+			"Location: <highlight>{$address->display_name}<end>\n";
+		if (isset($address->extratags->population)) {
+			$blob .= "Population: <highlight>".
+				number_format((float)$address->extratags->population, 0).
+				"<end>\n";
+		}
+		$blob .=
+			"Timezone: <highlight>UTC{$timezone}<end>\n".
+			"Lat/Lon: <highlight>{$latString}° {$lonString}°<end> {$mapCommand}\n".
 			"\n".
-			"Currently: <highlight>${tempC}°C<end>".
-				" (<highlight>${tempF}°F<end>)".
-				", <highlight>${weatherString}<end>\n".
-			"Feels like: <highlight>${tempFeelsC}°C<end>".
-				" (<highlight>${tempFeelsF}°F<end>)\n".
-			"Clouds: <highlight>${clouds}%<end>\n".
-			"Humidity: <highlight>${humidity}%<end>\n".
-			((isset($visibilityKM) && isset($visibilityMiles))
-				? "Visibility: <highlight>${visibilityKM} km<end> (<highlight>${visibilityMiles} miles<end>)\n"
+			"Currently: <highlight>{$tempC}°C<end>".
+				" (<highlight>{$tempF}°F<end>)".
+				", <highlight>{$weatherString}<end>\n".
+			"Feels like: <highlight>{$tempFeelsC}°C<end>".
+				" (<highlight>{$tempFeelsF}°F<end>)\n".
+			"Clouds: <highlight>{$clouds}%<end>\n".
+			"Humidity: <highlight>{$humidity}%<end>\n".
+			(
+				(isset($visibilityKM, $visibilityMiles))
+				? "Visibility: <highlight>{$visibilityKM} km<end> (<highlight>{$visibilityMiles} miles<end>)\n"
 				: ""
 			).
-			"Pressure: <highlight>{$pressureHPA} hPa <end>(<highlight>${pressureHG}\" Hg<end>)\n".
+			"Pressure: <highlight>{$pressureHPA} hPa <end>(<highlight>{$pressureHG}\" Hg<end>)\n".
 			"Wind: <highlight>{$windStrength}<end> - <highlight>{$windSpeedKMH} km/h ({$windSpeedMPH} mph)<end> from the <highlight>{$windDirection}<end>\n".
 			"\n".
 			"Sunrise: <highlight>{$sunRise}<end>\n".
 			"Sunset: <highlight>{$sunSet}<end>\n".
 			"\n".
-			$this->text->makeChatcmd("Forecast for the next 3 days", "/tell <myname> forecast ${locName},${locCC}");
+			$this->text->makeChatcmd("Forecast for the next 3 days", "/tell <myname> forecast {$address->display_name}");
 
 		return $blob;
 	}
@@ -326,146 +324,171 @@ class OWeatherController extends ModuleInstance {
 	 * either false for an unknown error, a string with the error message
 	 * or a hash with the data.
 	 *
-	 * @param array<string,int|string> $extraArgs
+	 * @return Promise<string>
 	 */
-	public function downloadWeather(string $apiKey, string $location, string $endpoint, array $extraArgs, callable $callback): void {
-		$this->http->get("http://api.openweathermap.org/data/2.5/${endpoint}")
-			->withQueryParams(
-				array_merge(
-					[
-						"q"     => $location,
-						"appid" => $apiKey,
-						"units" => "metric",
-						"mode"  => "json"
-					],
-					$extraArgs
-				)
-			)
-			->withHeader("Content-Type", "application/json")
-			->withTimeout(10)
-			->withCallback($callback);
+	public function downloadWeather(string $apiKey, Nominatim $address): Promise {
+		return call(function () use ($apiKey, $address): Generator {
+			$apiEndpoint = "https://api.openweathermap.org/data/2.5/weather?" . http_build_query([
+				"lat"   => $address->lat,
+				"lon"   => $address->lon,
+				"appid" => $apiKey,
+				"units" => "metric",
+				"lang"  => "en",
+			]);
+			$client = $this->builder->build();
+
+			/** @var Response */
+			$response = yield $client->request(new Request($apiEndpoint));
+			if ($response->getStatus() !== 200) {
+				throw new UserException("Error received from Weather provider.");
+			}
+			return $response->getBody()->buffer();
+		});
 	}
 
 	/**
-	 * Get the weather forecast for &lt;location&gt;
+	 * Download the forecast data from the API, returning
+	 * either false for an unknown error, a string with the error message
+	 * or a hash with the data.
+	 *
+	 * @return Promise<string>
 	 */
+	public function downloadForecast(string $apiKey, Nominatim $address): Promise {
+		return call(function () use ($apiKey, $address): Generator {
+			$apiEndpoint = "https://api.openweathermap.org/data/2.5/forecast?" . http_build_query([
+				"lat"   => $address->lat,
+				"lon"   => $address->lon,
+				"appid" => $apiKey,
+				"units" => "metric",
+				"lang"  => "en",
+				"cnt"   => "24",
+			]);
+			$client = $this->builder->build();
+
+			/** @var Response */
+			$response = yield $client->request(new Request($apiEndpoint));
+			if ($response->getStatus() !== 200) {
+				throw new UserException("Error received from Weather provider.");
+			}
+			return $response->getBody()->buffer();
+		});
+	}
+
+	/** Get the weather forecast for &lt;location&gt; */
 	#[NCA\HandlesCommand("forecast")]
 	#[NCA\Help\Example("<symbol>forecast Hamburg")]
 	#[NCA\Help\Example("<symbol>forecast Hamburg, US")]
 	#[NCA\Help\Example("<symbol>forecast 30629, de", "to search by ZIP")]
 	#[NCA\Help\Group("oweather")]
-	public function forecastCommand(CmdContext $context, string $location): void {
+	public function forecastCommand(CmdContext $context, string $location): Generator {
 		$apiKey = $this->oweatherApiKey;
 		if (strlen($apiKey) !== 32) {
 			$context->reply("There is either no API key or an invalid one was set.");
 			return;
 		}
-		$this->downloadWeather(
-			$apiKey,
-			$location,
-			"forecast",
-			["cnt" => 24],
-			function (HttpResponse $response) use ($context): void {
-				$this->parseForecast($response, $context);
-			}
-		);
-	}
-
-	protected function parseForecast(HttpResponse $response, CmdContext $context): void {
-		if (isset($response->error) || !isset($response->body)) {
-			$context->reply("Error looking up the weather.");
-			return;
-		}
-		try {
-			$data = json_decode($response->body, true);
-			$forecast = new Forecast($data);
-		} catch (JsonException) {
-			$context->reply("Error parsing weather data.");
-			return;
-		} catch (Throwable $e) {
-			if (isset($data) && (int)$data["cod"] !== 200 && isset($data["message"])) {
-				$context->reply(
-					"Error looking up the weather: ".
-					"<highlight>" . $data["message"] . "<end>."
-				);
-			} else {
-				$context->reply("Error parsing weather data.");
-			}
-			return;
-		}
-		$blob = $this->forecastToString($forecast);
-		$blob = preg_replace(
-			"/<highlight><black>([^<]+)<end>([^<]+)<end>/",
-			'<black>$1<end><highlight>$2<end>',
-			$blob
-		);
-
-		$locCC = $this->getCountryName($forecast->city->country);
-		$msg = $this->text->makeBlob("Weather forecast for {$forecast->city->name}, {$locCC}", $blob);
-
+		$nominatim = yield $this->weatherController->lookupLocation($location);
+		$forecast = yield $this->downloadForecast($apiKey, $nominatim);
+		$msg = $this->renderForecast($forecast, $nominatim);
 		$context->reply($msg);
 	}
 
-	/**
-	 * Get the current weather for &lt;location&gt;
-	 */
+	/** Get the current weather for &lt;location&gt; */
 	#[NCA\HandlesCommand("oweather")]
 	#[NCA\Help\Group("oweather")]
 	#[NCA\Help\Example("<symbol>oweather Hamburg")]
 	#[NCA\Help\Example("<symbol>oweather Hamburg, US")]
 	#[NCA\Help\Example("<symbol>oweather 30629, de", "to search by ZIP")]
-	public function weatherCommand(CmdContext $context, string $location): void {
+	public function weatherCommand(CmdContext $context, string $location): Generator {
 		$apiKey = $this->oweatherApiKey;
 		if (strlen($apiKey) != 32) {
 			$context->reply("There is either no API key or an invalid one was set.");
 			return;
 		}
-		$this->downloadWeather(
-			$apiKey,
-			$location,
-			"weather",
-			[],
-			function (HttpResponse $response) use ($context): void {
-				$this->displayWeather($response, $context);
-			}
-		);
+		$nominatim = yield $this->weatherController->lookupLocation($location);
+		$weather = yield $this->downloadWeather($apiKey, $nominatim);
+		$msg = $this->renderWeather($weather, $nominatim);
+		$context->reply($msg);
 	}
 
-	protected function displayWeather(HttpResponse $response, CmdContext $context): void {
-		if (isset($response->error) || !isset($response->body)) {
-			$context->reply("Error looking up the weather.");
-			return;
+	/** @return string[] */
+	protected function renderForecast(string $body, Nominatim $address): array {
+		if (!isset($body)) {
+			throw new UserException("Error looking up the weather.");
 		}
 		try {
-			$data = json_decode($response->body, true);
-			$weather = new Weather($data);
+			$data = json_decode($body, true);
+			$forecast = new Forecast($data);
 		} catch (JsonException) {
-			$context->reply("Error parsing weather data.");
-			return;
+			throw new UserException("Error parsing weather data.");
 		} catch (Throwable $e) {
 			if (isset($data) && (int)$data["cod"] !== 200 && isset($data["message"])) {
-				$context->reply(
+				throw new UserException(
 					"Error looking up the weather: ".
-					"<highlight>" . $data["message"] . "<end>."
+					"<highlight>{$data['message']}<end>."
 				);
-			} else {
-				$context->reply("Error parsing weather data.");
 			}
-			return;
+			throw new UserException("Error parsing weather data.");
+		}
+		$blob = $this->forecastToString($forecast, $address);
+		$blob = preg_replace(
+			"/<highlight><black>([^<]+)<end>([^<]+)<end>/",
+			'<black>$1<end><highlight>$2<end>',
+			$blob
+		);
+		$locationName = $this->getLocationName($address);
+
+		$msg = $this->text->makeBlob("Weather forecast for {$locationName}", $blob);
+		return (array)$msg;
+	}
+
+	/** @return string[] */
+	protected function renderWeather(string $body, Nominatim $address): array {
+		if (!isset($body)) {
+			throw new UserException("Error looking up the weather.");
+		}
+		try {
+			$data = json_decode($body, true);
+			$weather = new Weather($data);
+		} catch (JsonException) {
+			throw new UserException("Error parsing weather data.");
+		} catch (Throwable) {
+			if (isset($data) && (int)$data["cod"] !== 200 && isset($data["message"])) {
+				throw new UserException(
+					"Error looking up the weather: ".
+					"<highlight>{$data['message']}<end>."
+				);
+			}
+			throw new UserException("Error parsing weather data.");
 		}
 		$tempC = number_format($weather->main->temp, 1);
 		$weatherString = $weather->weather[0]->description;
-		$cc = $this->getCountryName($weather->sys->country);
 
-		$blob = $this->weatherToString($weather);
+		$blob = $this->weatherToString($weather, $address);
+
+		$locationName = $this->getLocationName($address);
 
 		$msg = $this->text->blobWrap(
-			"The weather for <highlight>{$weather->name}<end>, ${cc} is ".
-			"<highlight>${tempC}°C<end> with {$weatherString} [",
+			"The weather for <highlight>{$locationName}<end> is ".
+			"<highlight>{$tempC}°C<end> with {$weatherString} [",
 			$this->text->makeBlob("Details", $blob),
 			"]"
 		);
 
-		$context->reply($msg);
+		return (array)$msg;
+	}
+
+	protected function getLocationName(Nominatim $address): string {
+		$placeParts = explode(", ", $address->display_name);
+		$locationName = $placeParts[0];
+		// If we're being shown just a ZIP code or house number, add one more layer of info
+		if (preg_match("/^\d+/", $locationName)) {
+			$locationName = "{$placeParts[1]} {$locationName}";
+		}
+		if (count($placeParts) > 2 && $address->address->country_code === "us") {
+			$locationName .= ", " . $address->address->state;
+		} elseif (count($placeParts) > 1) {
+			$locationName .= ", " . $address->address->country;
+		}
+		return $locationName;
 	}
 }
