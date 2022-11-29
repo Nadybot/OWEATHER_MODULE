@@ -419,7 +419,7 @@ class OWeatherController extends ModuleInstance {
 			$data = json_decode($body, true);
 			$forecast = new Forecast($data);
 		} catch (JsonException) {
-			throw new UserException("Error parsing weather data.");
+			throw new UserException("Error parsing weather data, invalid JSON received.");
 		} catch (Throwable $e) {
 			if (isset($data) && (int)$data["cod"] !== 200 && isset($data["message"])) {
 				throw new UserException(
@@ -427,7 +427,7 @@ class OWeatherController extends ModuleInstance {
 					"<highlight>{$data['message']}<end>."
 				);
 			}
-			throw new UserException("Error parsing weather data.");
+			throw new UserException("Error parsing weather data: " . $e->getMessage());
 		}
 		$blob = $this->forecastToString($forecast, $address);
 		$blob = preg_replace(
@@ -449,16 +449,16 @@ class OWeatherController extends ModuleInstance {
 		try {
 			$data = json_decode($body, true);
 			$weather = new Weather($data);
-		} catch (JsonException) {
-			throw new UserException("Error parsing weather data.");
-		} catch (Throwable) {
+		} catch (JsonException $e) {
+			throw new UserException("Error parsing weather data, invalid JSON received.");
+		} catch (Throwable $e) {
 			if (isset($data) && (int)$data["cod"] !== 200 && isset($data["message"])) {
 				throw new UserException(
 					"Error looking up the weather: ".
 					"<highlight>{$data['message']}<end>."
 				);
 			}
-			throw new UserException("Error parsing weather data.");
+			throw new UserException("Error parsing weather data: " . $e->getMessage());
 		}
 		$tempC = number_format($weather->main->temp, 1);
 		$weatherString = $weather->weather[0]->description;
